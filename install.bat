@@ -1,34 +1,69 @@
 @echo off
-echo Installing APIGO service...
+echo ======================================
+echo       APIGO 服务安装工具
+echo       版本: v1.0
+echo ======================================
+echo.
 
-:: Get current directory
-set CURRENT_DIR=%~dp0
-set SERVICE_NAME=APIGO
-set EXE_PATH=%CURRENT_DIR%m.exe
-
-:: Stop and remove service (if exists)
-echo Checking if service exists...
-sc query %SERVICE_NAME% > nul
-if %errorlevel% equ 0 (
-    echo Service already exists, removing...
-    %CURRENT_DIR%nssm.exe stop %SERVICE_NAME%
-    %CURRENT_DIR%nssm.exe remove %SERVICE_NAME% confirm
+:: 检查是否以管理员身份运行
+net session >nul 2>&1
+if %errorlevel% neq 0 (
+    echo 错误: 请以管理员身份运行此脚本！
+    echo 请右键点击此脚本，选择"以管理员身份运行"。
+    pause
+    exit /b 1
 )
 
-:: Install service
-echo Installing service...
-%CURRENT_DIR%nssm.exe install %SERVICE_NAME% "%EXE_PATH%"
-%CURRENT_DIR%nssm.exe set %SERVICE_NAME% DisplayName "APIGO Service"
-%CURRENT_DIR%nssm.exe set %SERVICE_NAME% Description "SQL-based API Service"
-%CURRENT_DIR%nssm.exe set %SERVICE_NAME% AppDirectory "%CURRENT_DIR%"
-%CURRENT_DIR%nssm.exe set %SERVICE_NAME% AppExit Default Restart
-%CURRENT_DIR%nssm.exe set %SERVICE_NAME% AppStdout "%CURRENT_DIR%apigo.log"
-%CURRENT_DIR%nssm.exe set %SERVICE_NAME% AppStderr "%CURRENT_DIR%apigo.err"
-%CURRENT_DIR%nssm.exe set %SERVICE_NAME% Start SERVICE_AUTO_START
+:: 检查编译后的文件是否存在
+if not exist build\m.exe (
+    echo 错误: 未找到可执行文件 build\m.exe
+    echo 请先运行 build.bat 编译项目。
+    pause
+    exit /b 1
+)
 
-:: Start service
-echo Starting service...
-%CURRENT_DIR%nssm.exe start %SERVICE_NAME%
+echo 正在安装 APIGO 服务...
 
-echo APIGO service installation completed.
+:: 获取当前目录的绝对路径
+cd /d %~dp0
+set CURRENT_DIR=%CD%
+
+:: 使用nssm安装服务
+nssm.exe install APIGO "%CURRENT_DIR%\build\m.exe"
+nssm.exe set APIGO DisplayName "APIGO API服务"
+nssm.exe set APIGO Description "APIGO REST API服务 - SQL模板引擎"
+nssm.exe set APIGO AppDirectory "%CURRENT_DIR%\build"
+nssm.exe set APIGO AppStdout "%CURRENT_DIR%\build\stdout.log"
+nssm.exe set APIGO AppStderr "%CURRENT_DIR%\build\stderr.log"
+nssm.exe set APIGO AppRotateFiles 1
+nssm.exe set APIGO AppRotateBytes 10485760
+nssm.exe set APIGO Start SERVICE_AUTO_START
+
+:: 启动服务
+echo 正在启动 APIGO 服务...
+net start APIGO
+
+:: 检查服务是否成功启动
+sc query APIGO | find "RUNNING" > nul
+if %errorlevel% equ 0 (
+    echo.
+    echo ========== 安装成功 ==========
+    echo APIGO 服务已成功安装并启动。
+    echo 服务名称: APIGO
+    echo 可执行文件: %CURRENT_DIR%\build\m.exe
+    echo 日志文件: %CURRENT_DIR%\build\stdout.log
+    echo.
+    echo 您可以通过以下命令管理服务:
+    echo   启动: net start APIGO
+    echo   停止: net stop APIGO
+    echo   卸载: uninstall.bat
+    echo ===============================
+) else (
+    echo.
+    echo 警告: 服务安装成功，但启动失败。
+    echo 请检查配置文件和日志，然后手动启动服务。
+    echo 手动启动命令: net start APIGO
+)
+
+echo.
 pause 

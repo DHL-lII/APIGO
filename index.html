@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>APIGO测试页面</title>
+    <style>
+        body {
+            font-family: 'Microsoft YaHei', sans-serif;
+            line-height: 1.6;
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 20px;
+            color: #333;
+        }
+        .container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+        }
+        .panel {
+            flex: 1 1 45%;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 15px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1, h2 {
+            color: #0066cc;
+        }
+        input, button, textarea {
+            padding: 8px;
+            margin: 5px 0;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-family: inherit;
+        }
+        input, textarea {
+            width: calc(100% - 18px);
+        }
+        button {
+            background-color: #0066cc;
+            color: white;
+            border: none;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #0055aa;
+        }
+        pre {
+            background-color: #f5f5f5;
+            padding: 10px;
+            border-radius: 4px;
+            overflow-x: auto;
+        }
+        .success {
+            color: #28a745;
+        }
+        .error {
+            color: #dc3545;
+        }
+    </style>
+</head>
+<body>
+    <h1>APIGO 测试页面</h1>
+    
+    <div class="container">
+        <!-- API鉴权测试 -->
+        <div class="panel">
+            <h2>API鉴权测试</h2>
+            <p>使用登录名和密码进行鉴权（ERP特殊密码校验）</p>
+            <div>
+                <input type="text" id="loginName" placeholder="登录名" />
+            </div>
+            <div>
+                <input type="password" id="password" placeholder="密码" />
+            </div>
+            <div>
+                <button onclick="testLogin()">登录测试</button>
+            </div>
+            <pre id="loginResult">结果将显示在这里...</pre>
+        </div>
+        
+        <!-- 版本测试 -->
+        <div class="panel">
+            <h2>版本测试（匿名）</h2>
+            <p>无需鉴权的API测试</p>
+            <div>
+                <button onclick="testVer()">获取版本</button>
+            </div>
+            <pre id="verResult">结果将显示在这里...</pre>
+        </div>
+        
+        <!-- 令牌检测 -->
+        <div class="panel">
+            <h2>令牌检测</h2>
+            <p>测试JWT令牌是否有效</p>
+            <div>
+                <input type="text" id="token" placeholder="JWT令牌" />
+            </div>
+            <div>
+                <button onclick="testToken()">验证令牌</button>
+            </div>
+            <pre id="tokenResult">结果将显示在这里...</pre>
+        </div>
+        
+        <!-- 用户信息 -->
+        <div class="panel">
+            <h2>获取用户信息</h2>
+            <p>使用令牌获取用户信息</p>
+            <div>
+                <button onclick="getUserInfo()">获取用户</button>
+            </div>
+            <pre id="userResult">结果将显示在这里...</pre>
+        </div>
+    </div>
+
+    <script>
+        // 配置
+        const apiBaseUrl = '/api';
+        let currentToken = '';
+        
+        // API鉴权测试
+        async function testLogin() {
+            const loginName = document.getElementById('loginName').value;
+            const password = document.getElementById('password').value;
+            const resultElem = document.getElementById('loginResult');
+            
+            if (!loginName || !password) {
+                resultElem.innerHTML = '<span class="error">请输入登录名和密码</span>';
+                return;
+            }
+            
+            resultElem.innerHTML = '请求中...';
+            
+            try {
+                const response = await fetch(`${apiBaseUrl}/login`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        loginName: loginName,
+                        password: password
+                    })
+                });
+                
+                const data = await response.json();
+                resultElem.innerHTML = JSON.stringify(data, null, 2);
+                
+                if (data.status === 0 && data.token) {
+                    currentToken = data.token;
+                    document.getElementById('token').value = data.token;
+                    resultElem.innerHTML += '\n<span class="success">登录成功，令牌已保存</span>';
+                }
+            } catch (error) {
+                resultElem.innerHTML = `<span class="error">请求出错: ${error.message}</span>`;
+            }
+        }
+        
+        // 版本测试
+        async function testVer() {
+            const resultElem = document.getElementById('verResult');
+            resultElem.innerHTML = '请求中...';
+            
+            try {
+                const response = await fetch(`${apiBaseUrl}/ver`, {
+                    method: 'GET'
+                });
+                
+                const data = await response.json();
+                resultElem.innerHTML = JSON.stringify(data, null, 2);
+            } catch (error) {
+                resultElem.innerHTML = `<span class="error">请求出错: ${error.message}</span>`;
+            }
+        }
+        
+        // 令牌检测
+        function testToken() {
+            const token = document.getElementById('token').value;
+            const resultElem = document.getElementById('tokenResult');
+            
+            if (!token) {
+                resultElem.innerHTML = '<span class="error">请输入令牌</span>';
+                return;
+            }
+            
+            resultElem.innerHTML = '请求中...';
+            
+            // 使用一个需要鉴权的API端点来测试令牌
+            fetch(`${apiBaseUrl}/users`, {
+                method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json'
+                },
+                credentials: 'include',
+                mode: 'cors'
+            })
+            .then(response => {
+                console.log('Response status:', response.status);
+                console.log('Response headers:', response.headers);
+                
+                if (!response.ok) {
+                    throw new Error(`状态码: ${response.status}`);
+                }
+                return response.json();
+            })
+            .then(data => {
+                console.log('Response data:', data);
+                resultElem.innerHTML = JSON.stringify(data, null, 2);
+                
+                if (data.status === 0) {
+                    resultElem.innerHTML += '\n<span class="success">令牌有效</span>';
+                    currentToken = token;
+                } else {
+                    resultElem.innerHTML += '\n<span class="error">令牌无效</span>';
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                resultElem.innerHTML = `<span class="error">请求出错: ${error.message}</span>`;
+            });
+        }
+        
+        // 获取用户信息
+        function getUserInfo() {
+            const token = currentToken || document.getElementById('token').value;
+            const resultElem = document.getElementById('userResult');
+            
+            if (!token) {
+                resultElem.innerHTML = '<span class="error">请先登录或输入令牌</span>';
+                return;
+            }
+            
+            resultElem.innerHTML = '请求中...';
+            
+            fetch(`${apiBaseUrl}/users`, {
+                method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json'
+                },
+                credentials: 'include',
+                mode: 'cors'
+            })
+            .then(response => {
+                console.log('Response status:', response.status);
+                console.log('Response headers:', response.headers);
+                
+                if (!response.ok) {
+                    throw new Error(`状态码: ${response.status}`);
+                }
+                return response.json();
+            })
+            .then(data => {
+                console.log('Response data:', data);
+                resultElem.innerHTML = JSON.stringify(data, null, 2);
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                resultElem.innerHTML = `<span class="error">请求出错: ${error.message}</span>`;
+            });
+        }
+    </script>
+</body>
+</html> 

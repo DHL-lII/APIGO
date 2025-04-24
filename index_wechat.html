@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>APIGO微信登录测试</title>
+    <style>
+        body {
+            font-family: 'Microsoft YaHei', sans-serif;
+            line-height: 1.6;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            color: #333;
+        }
+        .container {
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #0066cc;
+            text-align: center;
+        }
+        .wx-btn {
+            display: block;
+            width: 100%;
+            padding: 12px;
+            background-color: #07c160;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 16px;
+            cursor: pointer;
+            text-align: center;
+            margin: 20px 0;
+        }
+        pre {
+            background-color: #f5f5f5;
+            padding: 10px;
+            border-radius: 4px;
+            overflow-x: auto;
+        }
+        .success {
+            color: #28a745;
+        }
+        .error {
+            color: #dc3545;
+        }
+        .loading {
+            text-align: center;
+            margin: 20px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>APIGO 微信登录测试</h1>
+        
+        <div id="wxLogin">
+            <p>此页面用于测试通过微信登录API获取用户信息</p>
+            <button class="wx-btn" onclick="wxLogin()">微信登录</button>
+        </div>
+        
+        <div id="codePanel" style="display:none;">
+            <p>请输入微信授权返回的 code：</p>
+            <input type="text" id="wxCode" style="width:100%; padding:8px; margin:10px 0; border:1px solid #ddd; border-radius:4px;" placeholder="微信授权code">
+            <button class="wx-btn" style="background-color:#0066cc;" onclick="submitWxCode()">提交授权码</button>
+        </div>
+        
+        <div id="loading" class="loading" style="display:none;">
+            <p>处理中，请稍候...</p>
+        </div>
+        
+        <div id="result">
+            <h3>结果：</h3>
+            <pre id="resultContent">暂无数据</pre>
+        </div>
+    </div>
+
+    <script>
+        // 配置
+        var apiBaseUrl = 'http://localhost:9092/api';
+        
+        // 模拟微信登录
+        function wxLogin() {
+            // 在真实应用中，这里会重定向到微信授权页面
+            // 由于这是测试页面，我们仅显示code输入框
+            document.getElementById('wxLogin').style.display = 'none';
+            document.getElementById('codePanel').style.display = 'block';
+            
+            document.getElementById('resultContent').innerHTML = '请输入微信授权返回的code...';
+        }
+        
+        // 提交微信授权码
+        function submitWxCode() {
+            var codeElement = document.getElementById('wxCode');
+            var resultElem = document.getElementById('resultContent');
+            
+            if (!codeElement || !codeElement.value) {
+                resultElem.innerHTML = '<span class="error">请输入微信授权code</span>';
+                return;
+            }
+            
+            var code = codeElement.value.trim();
+            
+            // 显示加载状态
+            document.getElementById('loading').style.display = 'block';
+            resultElem.innerHTML = '请求中...';
+            
+            // 使用XMLHttpRequest替代fetch，以提高兼容性
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', apiBaseUrl + '/wxlogin', true);
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            xhr.withCredentials = true;  // 允许跨域请求携带凭证
+            
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState === 4) {
+                    // 隐藏加载状态
+                    document.getElementById('loading').style.display = 'none';
+                    
+                    if (xhr.status === 200) {
+                        try {
+                            var data = JSON.parse(xhr.responseText);
+                            resultElem.innerHTML = JSON.stringify(data, null, 2);
+                            
+                            if (data.status === 0 && data.token) {
+                                resultElem.innerHTML += '\n<span class="success">微信登录成功！</span>';
+                            }
+                        } catch (e) {
+                            resultElem.innerHTML = '<span class="error">解析响应失败: ' + e.message + '</span>';
+                        }
+                    } else {
+                        resultElem.innerHTML = '<span class="error">请求出错: 状态码 ' + xhr.status + '</span>';
+                    }
+                }
+            };
+            xhr.onerror = function() {
+                document.getElementById('loading').style.display = 'none';
+                resultElem.innerHTML = '<span class="error">请求出错: 网络错误</span>';
+            };
+            xhr.send(JSON.stringify({
+                code: code
+            }));
+        }
+        
+        // 处理URL参数，如果是从微信重定向回来的情况
+        function handleUrlParams() {
+            // 兼容性更强的参数解析方法
+            function getQueryParam(name) {
+                var query = window.location.search.substring(1);
+                var vars = query.split('&');
+                for (var i = 0; i < vars.length; i++) {
+                    var pair = vars[i].split('=');
+                    if (decodeURIComponent(pair[0]) === name) {
+                        return decodeURIComponent(pair[1] || '');
+                    }
+                }
+                return null;
+            }
+            
+            var code = getQueryParam('code');
+            
+            if (code) {
+                document.getElementById('wxLogin').style.display = 'none';
+                document.getElementById('codePanel').style.display = 'block';
+                
+                var codeElement = document.getElementById('wxCode');
+                if (codeElement) {
+                    codeElement.value = code;
+                    
+                    // 自动提交code
+                    submitWxCode();
+                }
+            }
+        }
+        
+        // 页面加载完成后检查URL参数
+        if (window.addEventListener) {
+            window.addEventListener('load', handleUrlParams);
+        } else {
+            // 兼容旧版IE
+            window.onload = handleUrlParams;
+        }
+    </script>
+</body>
+</html> 

@@ -1,0 +1,25 @@
+:8099 {
+    # 前端静态文件
+    root * D:\wwwroot\Apigo\APIServer\build
+    file_server
+
+    # API 路由配置 - 使用反向代理并保留原始请求头
+    reverse_proxy /api/* 127.0.0.1:9092 {
+        # 保留原始请求头，特别是Authorization头
+        header_up Host {upstream_hostport}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+        
+        # 允许API服务器的CORS配置生效，不再在Caddy中设置CORS头
+        # header_down Access-Control-Allow-Origin "*"
+        # header_down Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
+        # header_down Access-Control-Allow-Headers "Origin, Authorization, Content-Type"
+        # header_down Access-Control-Allow-Credentials "true"
+    }
+
+    # 记录请求日志
+    log {
+        output file D:\wwwroot\Apigo\APIServer\caddy.log
+    }
+} 

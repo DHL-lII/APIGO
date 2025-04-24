@@ -33,29 +33,19 @@ type (
 	Map map[string]any
 	// Cfg 定义配置文件结构
 	Cfg struct {
-		Driver    string `json:"driver"`    // 数据库驱动类型：mssql/mysql/postgres
-		Dsn       string `json:"dsn"`       // 数据库连接字符串
-		Query     string `json:"query"`     // 用于获取SQL模板的查询语句
-		Api       string `json:"api"`       // API路由路径
-		Port      int    `json:"port"`      // 服务监听端口
-		JwtSecret string `json:"jwtSecret"` // JWT密钥
-		JwtExpire int64  `json:"jwtExpire"` // JWT过期时间（秒）
-		JwtIssuer string `json:"jwtIssuer"` // JWT签发者
+		Driver string `json:"driver"` // 数据库驱动类型：mssql/mysql/postgres
+		Dsn    string `json:"dsn"`    // 数据库连接字符串
+		Query  string `json:"query"`  // 用于获取SQL模板的查询语句
+		Api    string `json:"api"`    // API路由路径
+		Port   int    `json:"port"`   // 服务监听端口
+
+		JWTSecret string `json:"jwtSecret"` // JWT签名密钥
+		JWTExpire int    `json:"jwtExpire"` // JWT过期时间（秒）
+		JWTIssuer string `json:"jwtIssuer"` // JWT签发者
 
 		WechatAppID    string `json:"wechatAppID"`    // 微信小程序AppID
 		WechatSecret   string `json:"wechatSecret"`   // 微信小程序Secret
-		WechatTokenUrl string `json:"wechatTokenUrl"` // 微信获取token的URL
-
-		AuthQuery      string            `json:"authQuery"`      // 鉴权查询语句
-		Routes         map[string]string `json:"routes"`         // 路由映射配置
-		QueryTemplates map[string]string `json:"queryTemplates"` // 查询模板名称映射
-	}
-
-	// JwtClaims 定义JWT的载荷结构
-	JwtClaims struct {
-		UserID   int    `json:"user_id"`
-		Username string `json:"username"`
-		jwt.RegisteredClaims
+		WechatTokenUrl string `json:"wechatTokenUrl"` // 微信接口URL
 	}
 )
 
@@ -65,13 +55,151 @@ var (
 	dbMutex sync.Mutex // 保护数据库连接操作的互斥锁
 )
 
+// Claims 定义JWT的声明
+type Claims struct {
+	UserID   int    `json:"userID"`
+	UserName string `json:"userName"`
+	jwt.RegisteredClaims
+}
+
+// 生成JWT令牌
+func GenerateToken(userID int, userName string) (string, error) {
+	// 设置过期时间
+	expireTime := time.Now().Add(time.Duration(cfg.JWTExpire) * time.Second)
+
+	claims := Claims{
+		UserID:   userID,
+		UserName: userName,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(expireTime),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			Issuer:    cfg.JWTIssuer,
+		},
+	}
+
+	// 使用HS256算法创建token
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+
+	// 签名token
+	return token.SignedString([]byte(cfg.JWTSecret))
+}
+
+// 验证JWT令牌
+func ParseToken(tokenString string) (*Claims, error) {
+	// 解析token
+	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
+		// 验证签名算法是否为HS256
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return []byte(cfg.JWTSecret), nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	// 验证并返回Claims
+	if claims, ok := token.Claims.(*Claims); ok && token.Valid {
+		return claims, nil
+	}
+
+	return nil, fmt.Errorf("invalid token")
+}
+
+// JWT授权中间件
+func JWTAuth() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// 从请求头获取token
+		tokenString := c.GetHeader("Authorization")
+		if tokenString == "" {
+			// 尝试从查询参数获取token
+			tokenString = c.Query("token")
+		}
+
+		// 检查token是否存在
+		if tokenString == "" {
+			c.JSON(http.StatusUnauthorized, Map{"status": 1, "message": "未提供授权令牌"})
+			c.Abort() // 只需要Abort，不需要return
+			return
+		}
+
+		// 移除Bearer前缀（如果存在）
+		if strings.HasPrefix(tokenString, "Bearer ") {
+			tokenString = tokenString[7:]
+		}
+
+		// 解析和验证token
+		claims, err := ParseToken(tokenString)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, Map{"status": 1, "message": "无效的授权令牌", "error": err.Error()})
+			c.Abort() // 只需要Abort，不需要return
+			return
+		}
+
+		// 将用户信息存储在上下文中
+		c.Set("userID", claims.UserID)
+		c.Set("userName", claims.UserName)
+
+		c.Next()
+	}
+}
+
+// WechatResponse 微信登录接口返回数据结构
+type WechatResponse struct {
+	OpenID     string `json:"openid"`
+	SessionKey string `json:"session_key"`
+	UnionID    string `json:"unionid"`
+	ErrCode    int    `json:"errcode"`
+	ErrMsg     string `json:"errmsg"`
+}
+
+// 微信鉴权，通过code获取openid
+func GetWechatOpenID(code string) (*WechatResponse, error) {
+	// 构建请求URL
+	reqURL := fmt.Sprintf("%s?appid=%s&secret=%s&js_code=%s&grant_type=authorization_code",
+		cfg.WechatTokenUrl, cfg.WechatAppID, cfg.WechatSecret, code)
+
+	// 发起HTTP请求
+	resp, err := http.Get(reqURL)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	// 读取响应
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	// 解析JSON
+	var wxResp WechatResponse
+	if err := json.Unmarshal(body, &wxResp); err != nil {
+		return nil, err
+	}
+
+	// 检查是否返回错误
+	if wxResp.ErrCode != 0 {
+		return nil, fmt.Errorf("微信接口返回错误: %d %s", wxResp.ErrCode, wxResp.ErrMsg)
+	}
+
+	return &wxResp, nil
+}
+
 // main 程序入口函数
 func main() {
 	// 读取与可执行文件同名的JSON配置文件
 	fp, fn := filepath.Split(os.Args[0])
 	b, err := ioutil.ReadFile(fp + strings.Replace(fn, ".exe", ".json", 1))
-	CatchErr("READ-CONF:", err)
-	CatchErr("PARSE-CONF:", json.Unmarshal(b, &cfg))
+	if err != nil {
+		log.Fatalf("无法读取配置文件: %v", err)
+	}
+
+	// 解析配置文件
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		log.Fatalf("配置文件格式错误: %v", err)
+	}
 
 	// 初始化数据库连接池
 	initDB()
@@ -80,29 +208,18 @@ func main() {
 	gin.SetMode(gin.ReleaseMode)
 	// 创建默认的Gin路由引擎，包含Logger和Recovery中间件
 	r := gin.Default()
-	// 添加CORS中间件，允许跨域请求
-	r.Use(cors.Default())
-	// 添加JWT认证中间件
-	r.Use(JWTAuth())
+
+	// 配置CORS中间件
+	r.Use(configureCORS())
+
+	// API路由组，根据鉴权需求配置
+	apiGroup := r.Group("/")
+
 	// 注册通用API处理函数，支持所有HTTP方法
-	r.Any(cfg.Api, Api)
-
-	// 使用配置的路由路径注册登录接口
-	loginPath := "/login" // 默认路径
-	if cfg.Routes != nil && cfg.Routes["login"] != "" {
-		loginPath = cfg.Routes["login"]
-	}
-	r.POST(loginPath, NxLogin)
-
-	// 使用配置的路由路径注册微信登录接口
-	wxLoginPath := "/wx/login" // 默认路径
-	if cfg.Routes != nil && cfg.Routes["wxLogin"] != "" {
-		wxLoginPath = cfg.Routes["wxLogin"]
-	}
-	r.POST(wxLoginPath, WxLogin)
+	apiGroup.Any(cfg.Api, Api)
 
 	// 打印启动信息
-	log.Printf("【慧工厂】·【API启动:%v】·【by 一零院长】·【2023-present】·【v250424】", cfg.Port)
+	log.Printf("【慧工厂】·【API启动:%v】·【by 一零院长】·【2023-present】·【v250425】", cfg.Port)
 	// 启动HTTP服务
 	r.Run(fmt.Sprint(":", cfg.Port))
 }
@@ -154,30 +271,80 @@ func reconnectDB() {
 	log.Fatalf("无法重连数据库: %v", err)
 }
 
+// 验证密码 - ERP特殊密码验证
+// 根据md5(md5(LoginName+Password)+salt)进行验证
+func ValidatePassword(loginName, password, dbPassword, salt string) bool {
+	// 第一步：计算md5(LoginName+Password)
+	innerMd5 := md5.Sum([]byte(loginName + password))
+	innerMd5Str := hex.EncodeToString(innerMd5[:])
+
+	// 第二步：计算md5(md5(LoginName+Password)+salt)
+	outerMd5 := md5.Sum([]byte(innerMd5Str + salt))
+	calculatedPassword := hex.EncodeToString(outerMd5[:])
+
+	// 比较计算出的密码与数据库中的密码
+	return calculatedPassword == dbPassword
+}
+
 // Api 是通用的API处理函数，处理所有API请求
 func Api(c *gin.Context) {
+	// 允许跨域预检请求直接通过
+	if c.Request.Method == "OPTIONS" {
+		c.Status(http.StatusNoContent)
+		return
+	}
+
 	// 解析请求参数
 	param := ParseForm(c)
-	log.Println("REQ:", param)
 
 	// 获取路由参数和HTTP方法
 	action := c.Param("a")     // 从路由路径中提取动作参数
 	method := c.Request.Method // 获取HTTP方法(GET/POST等)
-	sqlstr := cfg.Query        // 获取SQL模板查询语句
 
 	// 从数据库获取SQL模板和鉴权信息
-	var result struct {
-		模板 string `db:"模板"`
-		鉴权 *int   `db:"鉴权"` // 使用指针类型，以便能够处理NULL值
-	}
-
-	err := db.Get(&result, sqlstr, action, method)
+	var tmpStr string
+	var auth *int
+	row := db.QueryRow(cfg.Query, action, method)
+	err := row.Scan(&tmpStr, &auth)
+	CatchErr("GET-API:", err)
 	if err != nil {
-		c.JSON(http.StatusNotFound, Map{"status": 404, "msg": "API未找到"})
+		c.JSON(http.StatusNotFound, Map{"status": 1, "message": "API不存在"})
 		return
 	}
 
-	tmpStr := result.模板
+	// 检查是否需要鉴权
+	if auth != nil && *auth == 1 {
+		// 从请求头获取token
+		tokenString := c.GetHeader("Authorization")
+
+		if tokenString == "" {
+			// 尝试从查询参数获取token
+			tokenString = c.Query("token")
+		}
+
+		// 检查token是否存在
+		if tokenString == "" {
+			c.JSON(http.StatusUnauthorized, Map{"status": 1, "message": "需要授权令牌"})
+			return
+		}
+
+		// 移除Bearer前缀（如果存在）
+		if strings.HasPrefix(tokenString, "Bearer ") {
+			tokenString = tokenString[7:]
+		}
+
+		// 解析和验证token
+		claims, err := ParseToken(tokenString)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, Map{"status": 1, "message": "无效的授权令牌", "error": err.Error()})
+			return
+		}
+
+		// 将用户信息添加到参数中，以便SQL模板使用
+		param["userID"] = claims.UserID
+		param["userName"] = claims.UserName
+	}
+
 	buf := new(bytes.Buffer)
 	tmpsql := tmpStr
 
@@ -192,12 +359,16 @@ func Api(c *gin.Context) {
 	if e = tmp.Execute(buf, param); e == nil {
 		tmpsql = buf.String()
 	}
-	log.Println("TMP:", tmpsql, e)
 
 	// 执行SQL查询
 	data := make([]Map, 0)
 	rows, err := db.Queryx(tmpsql)
 	CatchErr("QUERY-ERR:", err)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, Map{"status": 1, "message": "查询执行失败", "error": err.Error()})
+		return
+	}
+
 	// 处理查询结果
 	for rows.Next() {
 		mp := make(Map, 0)
@@ -210,7 +381,197 @@ func Api(c *gin.Context) {
 			data = append(data, mp)
 		}
 	}
-	log.Println("RET:", data)
+
+	// 处理微信登录请求
+	if action == "wxlogin" && method == "POST" {
+		code, hasCode := param["code"]
+		if hasCode {
+			// 获取微信OpenID
+			wxResp, err := GetWechatOpenID(code.(string))
+			if err != nil {
+				c.JSON(http.StatusOK, Map{
+					"status":  1,
+					"message": "获取微信用户信息失败",
+					"error":   err.Error(),
+				})
+				return
+			}
+
+			// 如果已经执行了SQL查询（通过模板中的{{.openid}}占位符）
+			// 则直接使用查询结果，否则重新执行查询
+			userData := data
+			// 如果SQL模板中有OpenID占位符但未能替换，这里需要重新查询
+			if strings.Contains(tmpsql, "{{.openid}}") {
+				// 替换模板中的{{.openid}}
+				newSql := strings.ReplaceAll(tmpsql, "{{.openid}}", wxResp.OpenID)
+
+				if newSql != tmpsql {
+					// SQL发生了变化，需要重新查询
+					rows, err := db.Queryx(newSql)
+					CatchErr("QUERY-ERR:", err)
+					if err != nil {
+						c.JSON(http.StatusInternalServerError, Map{"status": 1, "message": "查询执行失败", "error": err.Error()})
+						return
+					}
+
+					// 清空原来的数据，填充新数据
+					userData = make([]Map, 0)
+					for rows.Next() {
+						mp := make(Map, 0)
+						err = rows.MapScan(mp)
+						if err == nil {
+							// 转换值的格式
+							for k, val := range mp {
+								mp[k] = Conv(val)
+							}
+							userData = append(userData, mp)
+						}
+					}
+				}
+			}
+
+			// 判断是否找到用户
+			if len(userData) > 0 {
+				// 提取用户信息
+				userID := 0
+				userName := ""
+				if id, ok := userData[0]["UserID"]; ok {
+					switch v := id.(type) {
+					case float64:
+						userID = int(v)
+					case int:
+						userID = v
+					case int64:
+						userID = int(v)
+					case string:
+						fmt.Sscanf(v, "%d", &userID)
+					}
+				}
+				if name, ok := userData[0]["UserName"]; ok {
+					if s, ok := name.(string); ok {
+						userName = s
+					}
+				}
+
+				// 生成JWT令牌
+				token, err := GenerateToken(userID, userName)
+				if err == nil {
+					// 返回令牌
+					c.JSON(http.StatusOK, Map{
+						"status": 0,
+						"token":  token,
+						"openid": wxResp.OpenID,
+						"data":   userData,
+					})
+					return
+				} else {
+					c.JSON(http.StatusInternalServerError, Map{
+						"status":  1,
+						"message": "令牌生成失败",
+						"error":   err.Error(),
+					})
+					return
+				}
+			} else {
+				// 未找到用户，返回openid，前端可处理注册流程
+				c.JSON(http.StatusOK, Map{
+					"status":  2, // 未找到用户但openid有效
+					"openid":  wxResp.OpenID,
+					"message": "未绑定用户",
+				})
+				return
+			}
+		} else {
+			c.JSON(http.StatusBadRequest, Map{
+				"status":  1,
+				"message": "缺少微信授权码",
+			})
+			return
+		}
+	}
+
+	// 处理登录请求和验证密码的逻辑
+	if action == "login" && method == "POST" && len(data) > 0 {
+		loginName, hasLoginName := param["loginName"]
+		password, hasPassword := param["password"]
+
+		if hasLoginName && hasPassword {
+			// 判断是否找到用户
+			if len(data) > 0 {
+				// 从查询结果中获取密码和盐值
+				dbPassword, hasDbPassword := data[0]["Password"]
+				salt, hasSalt := data[0]["Salt"]
+
+				if hasDbPassword && hasSalt {
+					// 验证密码
+					passwordValid := ValidatePassword(
+						loginName.(string),
+						password.(string),
+						dbPassword.(string),
+						salt.(string),
+					)
+
+					if !passwordValid {
+						// 密码验证失败
+						c.JSON(http.StatusUnauthorized, Map{
+							"status":  1,
+							"message": "用户名或密码错误",
+						})
+						return
+					}
+
+					// 密码验证成功，提取用户信息
+					userID := 0
+					userName := ""
+					// 提取用户ID和名称
+					if id, ok := data[0]["UserID"]; ok {
+						switch v := id.(type) {
+						case float64:
+							userID = int(v)
+						case int:
+							userID = v
+						case int64:
+							userID = int(v)
+						case string:
+							fmt.Sscanf(v, "%d", &userID)
+						}
+					}
+					if name, ok := data[0]["UserName"]; ok {
+						if s, ok := name.(string); ok {
+							userName = s
+						}
+					}
+
+					// 生成JWT令牌
+					token, err := GenerateToken(userID, userName)
+					if err == nil {
+						// 返回令牌
+						c.JSON(http.StatusOK, Map{
+							"status": 0,
+							"token":  token,
+							"data":   data,
+						})
+						return
+					} else {
+						c.JSON(http.StatusInternalServerError, Map{
+							"status":  1,
+							"message": "令牌生成失败",
+							"error":   err.Error(),
+						})
+						return
+					}
+				}
+			}
+
+			// 如果代码执行到这里，说明登录失败
+			c.JSON(http.StatusUnauthorized, Map{
+				"status":  1,
+				"message": "用户名或密码错误",
+			})
+			return
+		}
+	}
+
 	// 返回JSON格式的结果
 	c.JSON(http.StatusOK, Map{"data": data, "status": 0})
 }
@@ -259,142 +620,11 @@ func ParseForm(c *gin.Context) Map {
 // CatchErr 简单的错误处理函数，记录错误但不中断执行
 func CatchErr(desc string, err error) {
 	if err != nil {
-		log.Println(desc, err)
+		log.Printf("%s %v", desc, err)
 	}
 }
 
-// 生成JWT令牌
-func GenerateToken(userID int, username string) (string, error) {
-	// 设置JWT声明
-	claims := JwtClaims{
-		UserID:   userID,
-		Username: username,
-		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Second * time.Duration(cfg.JwtExpire))),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			NotBefore: jwt.NewNumericDate(time.Now()),
-			Issuer:    cfg.JwtIssuer,
-		},
-	}
-
-	// 创建令牌
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-
-	// 签名令牌
-	return token.SignedString([]byte(cfg.JwtSecret))
-}
-
-// 解析并验证JWT令牌
-func ParseToken(tokenString string) (*JwtClaims, error) {
-	// 解析令牌
-	token, err := jwt.ParseWithClaims(tokenString, &JwtClaims{}, func(token *jwt.Token) (interface{}, error) {
-		return []byte(cfg.JwtSecret), nil
-	})
-
-	if err != nil {
-		return nil, err
-	}
-
-	// 验证令牌有效性
-	if claims, ok := token.Claims.(*JwtClaims); ok && token.Valid {
-		return claims, nil
-	}
-
-	return nil, fmt.Errorf("无效的令牌")
-}
-
-// JWT认证中间件
-func JWTAuth() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		// 从路由获取Action参数
-		action := c.Param("a")
-
-		// 获取配置的登录路径
-		loginPath := "/login"
-		if cfg.Routes != nil && cfg.Routes["login"] != "" {
-			loginPath = cfg.Routes["login"]
-		}
-
-		// 获取配置的微信登录路径
-		wxLoginPath := "/wx/login"
-		if cfg.Routes != nil && cfg.Routes["wxLogin"] != "" {
-			wxLoginPath = cfg.Routes["wxLogin"]
-		}
-
-		// 如果是登录接口，跳过认证
-		if c.FullPath() == loginPath || c.FullPath() == wxLoginPath {
-			c.Next()
-			return
-		}
-
-		// 查询此API的模板和鉴权信息
-		var result struct {
-			模板 string `db:"模板"`
-			鉴权 *int   `db:"鉴权"` // 使用指针类型，以便能够处理NULL值
-		}
-
-		// 使用配置中的查询语句
-		err := db.Get(&result, cfg.Query, action, c.Request.Method)
-
-		if err != nil {
-			// 查询出错，默认为匿名访问，继续处理请求
-			log.Println("API查询出错:", err)
-			c.Next()
-			return
-		}
-
-		// 处理鉴权为NULL的情况
-		if result.鉴权 == nil {
-			log.Println("API鉴权值为NULL:", action)
-			c.Next()
-			return
-		}
-
-		// 根据鉴权标志值处理
-		switch *result.鉴权 {
-		case 0: // 匿名访问
-			c.Next()
-			return
-		case 1: // 需要鉴权
-			// 获取请求头中的Authorization
-			authHeader := c.GetHeader("Authorization")
-			if authHeader == "" {
-				c.JSON(http.StatusUnauthorized, Map{"status": 401, "msg": "未提供授权令牌"})
-				c.Abort()
-				return
-			}
-
-			// 处理Bearer令牌格式
-			parts := strings.SplitN(authHeader, " ", 2)
-			if !(len(parts) == 2 && parts[0] == "Bearer") {
-				c.JSON(http.StatusUnauthorized, Map{"status": 401, "msg": "令牌格式错误"})
-				c.Abort()
-				return
-			}
-
-			// 解析令牌
-			claims, err := ParseToken(parts[1])
-			if err != nil {
-				c.JSON(http.StatusUnauthorized, Map{"status": 401, "msg": "无效令牌: " + err.Error()})
-				c.Abort()
-				return
-			}
-
-			// 将用户信息存储在上下文中，供后续处理使用
-			c.Set("user_id", claims.UserID)
-			c.Set("username", claims.Username)
-			c.Next()
-		default: // 未知的鉴权类型
-			c.JSON(http.StatusForbidden, Map{"status": 403, "msg": "鉴权类型未知"})
-			c.Abort()
-			return
-		}
-	}
-}
-
-// MD5 计算字符串的MD5哈希值
-func MD5(text string) string {
-	hash := md5.New()
-	hash.Write([]byte(text))
-	return hex.EncodeToString(hash.Sum(nil))
+// configureCORS 配置CORS中间件
+func configureCORS() gin.HandlerFunc {
+	return cors.Default()
 }
