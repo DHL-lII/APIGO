@@ -1,0 +1,26 @@
+{
+  "driver": "mssql",
+  "dsn": "server=127.0.0.1;user id=sa;password=Fb2233;database=g4;port=1433;encrypt=disable",
+  "query": "SELECT 模板,鉴权 FROM API WHERE 路由 =? and 方法=?",
+  "api": "/api/:a",
+  "port": 9092,
+  "memo": "驱动可选：mssql/mysql/postgres",
+  
+  "jwtSecret": "Fb2233",
+  "jwtExpire": 7200,
+  "jwtIssuer": "apigo",
+  
+  "wechatAppID": "wx6666666666666666",
+  "wechatSecret": "66666666666666666666666666666666",
+  "wechatTokenUrl": "https://api.weixin.qq.com/sns/jscode2session",
+  
+  "routes": {
+    "login": "/login",
+    "wxLogin": "/wx/login"
+  },
+  
+  "queryTemplates": {
+    "loginQuery": "login_query",
+    "wxLoginQuery": "wx_login_query"
+  }
+}
