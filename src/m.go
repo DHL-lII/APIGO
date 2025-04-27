@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"crypto/md5"
+	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -43,9 +45,11 @@ type (
 		JWTExpire int    `json:"jwtExpire"` // JWT过期时间（秒）
 		JWTIssuer string `json:"jwtIssuer"` // JWT签发者
 
-		WechatAppID    string `json:"wechatAppID"`    // 微信小程序AppID
-		WechatSecret   string `json:"wechatSecret"`   // 微信小程序Secret
-		WechatTokenUrl string `json:"wechatTokenUrl"` // 微信接口URL
+		WechatAppID          string `json:"wechatAppID"`          // 微信小程序AppID
+		WechatSecret         string `json:"wechatSecret"`         // 微信小程序Secret
+		WechatTokenUrl       string `json:"wechatTokenUrl"`       // 微信接口URL
+		WechatAccessTokenUrl string `json:"wechatAccessTokenUrl"` // 微信获取access_token接口URL
+		WechatTicketUrl      string `json:"wechatTicketUrl"`      // 微信获取jsapi_ticket接口URL
 	}
 )
 
@@ -187,6 +191,93 @@ func GetWechatOpenID(code string) (*WechatResponse, error) {
 	return &wxResp, nil
 }
 
+// 用于存储jsapi_ticket和过期时间
+var (
+	jsapiTicket     string
+	jsapiTicketTime time.Time
+	jsapiTicketLock sync.Mutex
+)
+
+// 获取jsapi_ticket
+func getJsapiTicket() (string, error) {
+	jsapiTicketLock.Lock()
+	defer jsapiTicketLock.Unlock()
+
+	// 如果jsapi_ticket还有效，直接返回
+	if jsapiTicket != "" && time.Since(jsapiTicketTime) < (time.Duration(7000)*time.Second) {
+		return jsapiTicket, nil
+	}
+
+	// 第一步：请求access_token
+	accessTokenUrl := fmt.Sprintf("%s?grant_type=client_credential&appid=%s&secret=%s", cfg.WechatAccessTokenUrl, cfg.WechatAppID, cfg.WechatSecret)
+	resp, err := http.Get(accessTokenUrl)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, _ := ioutil.ReadAll(resp.Body)
+	var tokenResp struct {
+		AccessToken string `json:"access_token"`
+		ExpiresIn   int    `json:"expires_in"`
+		ErrCode     int    `json:"errcode"`
+		ErrMsg      string `json:"errmsg"`
+	}
+	if err := json.Unmarshal(body, &tokenResp); err != nil {
+		return "", err
+	}
+	if tokenResp.ErrCode != 0 {
+		return "", fmt.Errorf("获取access_token失败: %v", tokenResp.ErrMsg)
+	}
+
+	// 第二步：请求jsapi_ticket
+	ticketUrl := fmt.Sprintf("%s?access_token=%s&type=jsapi", cfg.WechatTicketUrl, tokenResp.AccessToken)
+	resp2, err := http.Get(ticketUrl)
+	if err != nil {
+		return "", err
+	}
+	defer resp2.Body.Close()
+
+	body2, _ := ioutil.ReadAll(resp2.Body)
+	var ticketResp struct {
+		Ticket    string `json:"ticket"`
+		ExpiresIn int    `json:"expires_in"`
+		ErrCode   int    `json:"errcode"`
+		ErrMsg    string `json:"errmsg"`
+	}
+	if err := json.Unmarshal(body2, &ticketResp); err != nil {
+		return "", err
+	}
+	if ticketResp.ErrCode != 0 {
+		return "", fmt.Errorf("获取ticket失败: %v", ticketResp.ErrMsg)
+	}
+
+	jsapiTicket = ticketResp.Ticket
+	jsapiTicketTime = time.Now()
+
+	return jsapiTicket, nil
+}
+
+// 生成随机字符串
+func randomString(n int) string {
+	letters := []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	b := make([]rune, n)
+	for i := range b {
+		b[i] = letters[r.Intn(len(letters))]
+	}
+	return string(b)
+}
+
+// 生成微信JS-SDK签名
+func generateWechatSignature(ticket, nonceStr string, timestamp int64, url string) string {
+	str := fmt.Sprintf("jsapi_ticket=%s&noncestr=%s&timestamp=%d&url=%s", ticket, nonceStr, timestamp, url)
+
+	h := sha1.New()
+	h.Write([]byte(str))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 // main 程序入口函数
 func main() {
 	// 读取与可执行文件同名的JSON配置文件
@@ -300,6 +391,34 @@ func Api(c *gin.Context) {
 	// 获取路由参数和HTTP方法
 	action := c.Param("a")     // 从路由路径中提取动作参数
 	method := c.Request.Method // 获取HTTP方法(GET/POST等)
+	// 特殊处理微信签名请求
+	if action == "wechat_signature" && method == "GET" {
+		url := c.Query("url")
+		if url == "" {
+			c.JSON(http.StatusBadRequest, Map{"status": 1, "message": "缺少url参数"})
+			return
+		}
+
+		ticket, err := getJsapiTicket()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, Map{"status": 1, "message": "获取jsapi_ticket失败", "error": err.Error()})
+			return
+		}
+
+		nonceStr := randomString(16)
+		timestamp := time.Now().Unix()
+
+		signature := generateWechatSignature(ticket, nonceStr, timestamp, url)
+
+		c.JSON(http.StatusOK, Map{
+			"status":    0,
+			"appId":     cfg.WechatAppID,
+			"timestamp": timestamp,
+			"nonceStr":  nonceStr,
+			"signature": signature,
+		})
+		return
+	}
 
 	// 从数据库获取SQL模板和鉴权信息
 	var tmpStr string

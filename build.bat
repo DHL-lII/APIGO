@@ -30,13 +30,12 @@ copy src\m.json build\m.json
 
 echo Copying test pages...
 copy index.html build\index.html
-copy index_wechat.html build\index_wechat.html
 
 echo.
 echo ========== Build Complete ==========
 echo Executable: build\m.exe
 echo Config: build\m.json
-echo Test Pages: build\index.html, build\index_wechat.html
+echo Test Pages: build\index.html
 echo.
 echo You can run install.bat to install as Windows service
 echo ================================
